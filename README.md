@@ -4,7 +4,7 @@ Proyecto en Python para descargar videos de YouTube en calidad maxima de 720p, g
 
 ## Licencia
 
-Este proyecto se distribuye bajo la licencia GNU GPLv3. Consulta [LICENSE](/Users/gadem/Developer/python/youtube_downloader/LICENSE).
+Este proyecto se distribuye bajo la licencia GNU GPLv3. Consulta [LICENSE](LICENSE).
 
 ## Requisitos
 
@@ -15,7 +15,7 @@ Este proyecto se distribuye bajo la licencia GNU GPLv3. Consulta [LICENSE](/User
 ## Instalacion
 
 ```bash
-cd /Users/gadem/Developer/python/youtube_downloader
+cd /youtube_downloader
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
