@@ -53,6 +53,24 @@ Para descargar solo los primeros 60 segundos de un video:
 python3 download_youtube.py --duration 60 "https://www.youtube.com/watch?v=VIDEO_ID"
 ```
 
+Para omitir archivos que ya existan y ajustar los reintentos:
+
+```bash
+python3 download_youtube.py --skip-existing --retry-delay 90 --max-retries 5
+```
+
+Para descargar solo el audio:
+
+```bash
+python3 download_youtube.py --audio-only "https://www.youtube.com/watch?v=VIDEO_ID"
+```
+
+Para descargar solo la miniatura y metadatos:
+
+```bash
+python3 download_youtube.py --thumbnail-only "https://www.youtube.com/watch?v=VIDEO_ID"
+```
+
 Si YouTube pide verificacion de bot, puedes usar cookies del navegador:
 
 ```bash
@@ -76,6 +94,12 @@ python3 download_youtube.py --cookies-from-browser chrome --js-runtime node
 - El nombre del archivo se genera con el titulo y el ID del video para evitar colisiones.
 - La miniatura principal tambien se descarga y se guarda junto al video en la mejor calidad que YouTube exponga.
 - Por cada video descargado se crea un archivo `.txt` con titulo, canal, URL, ID, duracion, fecha, vistas y descripcion.
+- Cada ejecucion genera `downloads/results.csv` con el estado de cada URL procesada.
+- Cada ejecucion genera `downloads/logs/last_run.log` con detalles tecnicos y errores.
+- `--skip-existing` omite videos ya descargados cuando detecta un archivo con el mismo ID.
+- `--retry-delay` y `--max-retries` permiten ajustar la estrategia de reintentos antibot.
+- `--audio-only` descarga solo el audio del video.
+- `--thumbnail-only` descarga solo la miniatura y el archivo de metadatos.
 - Si `ffmpeg` esta instalado, `yt-dlp` puede descargar mejor combinacion de video y audio manteniendo el objetivo de 720p.
 - Si no existe una version exacta a 720p, se descargara la mejor disponible que no supere esa altura.
 - Algunos videos de YouTube pueden requerir cookies de sesion para pasar la verificacion antibot.

@@ -5,10 +5,13 @@ from __future__ import annotations
 
 import argparse
 import csv
+import logging
 import shutil
 import sys
 import time
+from dataclasses import asdict, dataclass
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
 import yt_dlp
 from yt_dlp.utils import download_range_func
@@ -31,6 +34,24 @@ VIDEO_EXTENSIONS = {
     ".mpg",
     ".webm",
 }
+RESULTS_FILENAME = "results.csv"
+LOGS_DIRNAME = "logs"
+LOG_FILENAME = "last_run.log"
+
+
+@dataclass
+class DownloadResult:
+    url: str
+    status: str
+    output_file: str
+    metadata_file: str
+    thumbnail_file: str
+    error_type: str
+    error_message: str
+    attempts: int
+
+
+LOGGER = logging.getLogger("youtube_downloader")
 
 
 def positive_int(value: str) -> int:
@@ -90,10 +111,49 @@ def build_parser() -> argparse.ArgumentParser:
         type=positive_int,
         help="Descarga solo los primeros N segundos del video. Requiere ffmpeg.",
     )
+    parser.add_argument(
+        "--skip-existing",
+        action="store_true",
+        help="Omite URLs cuyo archivo de salida ya exista en la carpeta destino.",
+    )
+    parser.add_argument(
+        "--retry-delay",
+        type=positive_int,
+        default=BOT_RETRY_DELAY_SECONDS,
+        help=(
+            "Segundos de espera antes de reintentar errores de verificacion antibot. "
+            f"Por defecto: {BOT_RETRY_DELAY_SECONDS}"
+        ),
+    )
+    parser.add_argument(
+        "--max-retries",
+        type=positive_int,
+        default=BOT_MAX_RETRIES,
+        help=(
+            "Numero maximo de reintentos para errores de verificacion antibot. "
+            f"Por defecto: {BOT_MAX_RETRIES}"
+        ),
+    )
+    parser.add_argument(
+        "--audio-only",
+        action="store_true",
+        help="Descarga solo el audio del video.",
+    )
+    parser.add_argument(
+        "--thumbnail-only",
+        action="store_true",
+        help="Descarga solo la miniatura y los metadatos, sin bajar el video.",
+    )
     return parser
 
 
-def build_format_selector(ffmpeg_available: bool) -> str:
+def build_format_selector(
+    ffmpeg_available: bool, audio_only: bool = False, thumbnail_only: bool = False
+) -> str:
+    if thumbnail_only:
+        return "bestaudio/best"
+    if audio_only:
+        return "bestaudio/best"
     if ffmpeg_available:
         return "bestvideo[height<=720]+bestaudio/best[height<=720]/best"
 
@@ -187,12 +247,50 @@ def resolve_downloaded_path(output_dir: Path, info: dict, ydl: yt_dlp.YoutubeDL)
     return mp4_candidate
 
 
+def extract_video_id_from_url(url: str) -> str | None:
+    parsed = urlparse(url)
+    if parsed.netloc.endswith("youtu.be"):
+        video_id = parsed.path.strip("/")
+        return video_id or None
+
+    if "youtube.com" in parsed.netloc:
+        query_video_id = parse_qs(parsed.query).get("v", [])
+        if query_video_id:
+            return query_video_id[0]
+        path_parts = [part for part in parsed.path.split("/") if part]
+        if len(path_parts) >= 2 and path_parts[0] in {"shorts", "embed", "live"}:
+            return path_parts[1]
+
+    return None
+
+
+def has_existing_output(url: str, output_dir: Path, thumbnail_only: bool = False) -> bool:
+    video_id = extract_video_id_from_url(url)
+    if not video_id:
+        return False
+
+    marker = f" [{video_id}]"
+    for candidate in output_dir.iterdir():
+        if not candidate.is_file() or marker not in candidate.stem:
+            continue
+        suffix = candidate.suffix.lower()
+        if thumbnail_only and suffix in {".webp", ".jpg", ".jpeg", ".png"}:
+            return True
+        if not thumbnail_only and suffix in VIDEO_EXTENSIONS:
+            return True
+    return False
+
+
 def build_ydl_options(output_dir: Path, args: argparse.Namespace) -> dict:
     output_dir.mkdir(parents=True, exist_ok=True)
     ffmpeg_available = shutil.which("ffmpeg") is not None
 
     ydl_opts = {
-        "format": build_format_selector(ffmpeg_available),
+        "format": build_format_selector(
+            ffmpeg_available,
+            audio_only=args.audio_only,
+            thumbnail_only=args.thumbnail_only,
+        ),
         "outtmpl": str(output_dir / "%(title)s [%(id)s].%(ext)s"),
         "merge_output_format": "mp4",
         "noplaylist": True,
@@ -224,22 +322,39 @@ def build_ydl_options(output_dir: Path, args: argparse.Namespace) -> dict:
         ydl_opts["download_ranges"] = download_range_func(None, [(0, args.duration)])
         ydl_opts["force_keyframes_at_cuts"] = True
 
-    if ffmpeg_available:
+    if args.thumbnail_only:
+        ydl_opts["skip_download"] = True
+
+    if args.audio_only and ffmpeg_available:
         ydl_opts["postprocessors"] = [
             {
-                "key": "FFmpegVideoConvertor",
-                "preferedformat": "mp4",
+                "key": "FFmpegExtractAudio",
+                "preferredcodec": "mp3",
+                "preferredquality": "192",
             }
         ]
+        ydl_opts["postprocessor_args"] = []
+    if ffmpeg_available:
+        if not args.audio_only and not args.thumbnail_only:
+            ydl_opts["postprocessors"] = [
+                {
+                    "key": "FFmpegVideoConvertor",
+                    "preferedformat": "mp4",
+                }
+            ]
 
     return ydl_opts
 
 
 def download_video(
-    url: str, output_dir: Path, ydl: yt_dlp.YoutubeDL
+    url: str, output_dir: Path, ydl: yt_dlp.YoutubeDL, thumbnail_only: bool = False
 ) -> tuple[Path, Path, Path | None]:
     info = ydl.extract_info(url, download=True)
-    final_path = resolve_downloaded_path(output_dir, info, ydl)
+    if thumbnail_only:
+        final_path = Path(ydl.prepare_filename(info))
+    else:
+        final_path = resolve_downloaded_path(output_dir, info, ydl)
+
     metadata_path = write_metadata_file(final_path, info)
     thumbnail_path = resolve_thumbnail_path(final_path, info)
     return final_path, metadata_path, thumbnail_path
@@ -283,38 +398,146 @@ def write_failed_urls(output_dir: Path, failed_urls: list[str]) -> Path:
     return failed_path
 
 
+def setup_logging(output_dir: Path) -> Path:
+    logs_dir = output_dir / LOGS_DIRNAME
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    log_path = logs_dir / LOG_FILENAME
+    LOGGER.handlers.clear()
+    LOGGER.setLevel(logging.INFO)
+    handler = logging.FileHandler(log_path, encoding="utf-8")
+    handler.setFormatter(
+        logging.Formatter("%(asctime)s %(levelname)s %(message)s")
+    )
+    LOGGER.addHandler(handler)
+    LOGGER.propagate = False
+    return log_path
+
+
+def result_from_skip(url: str) -> DownloadResult:
+    return DownloadResult(
+        url=url,
+        status="skipped",
+        output_file="",
+        metadata_file="",
+        thumbnail_file="",
+        error_type="",
+        error_message="Archivo existente detectado; se omitio la descarga.",
+        attempts=0,
+    )
+
+
+def classify_error(exc: Exception) -> tuple[str, str]:
+    message = str(exc)
+    lowered = message.lower()
+
+    if is_bot_verification_error(exc):
+        return "bot_verification", (
+            "YouTube bloqueo la descarga por verificacion antibot. "
+            "Intenta de nuevo mas tarde o revisa tus cookies del navegador."
+        )
+    if "requested format is not available" in lowered:
+        return "format_unavailable", (
+            "YouTube no expuso un formato de video descargable para esta URL."
+        )
+    if "only images are available for download" in lowered:
+        return "images_only", (
+            "YouTube solo expuso imagenes para esta URL y no formatos de video."
+        )
+    if "private video" in lowered or "this video is private" in lowered:
+        return "private_video", "El video es privado y no se puede descargar."
+    if "video unavailable" in lowered:
+        return "video_unavailable", "El video no esta disponible."
+    if "unsupported url" in lowered:
+        return "unsupported_url", "La URL no es compatible con yt-dlp."
+
+    return "download_error", message
+
+
+def write_results_csv(output_dir: Path, results: list[DownloadResult]) -> Path:
+    results_path = output_dir / RESULTS_FILENAME
+    fieldnames = list(DownloadResult.__dataclass_fields__.keys())
+    with results_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        for result in results:
+            writer.writerow(asdict(result))
+    return results_path
+
+
 def is_bot_verification_error(exc: Exception) -> bool:
     message = str(exc).lower()
     return any(snippet in message for snippet in BOT_ERROR_SNIPPETS)
 
 
-def wait_before_retry(url: str, attempt: int) -> None:
+def wait_before_retry(url: str, attempt: int, retry_delay: int) -> None:
     print(
         f"YouTube pidio verificacion antibot para {url}. "
-        f"Esperando {BOT_RETRY_DELAY_SECONDS} segundos antes del reintento {attempt}.",
+        f"Esperando {retry_delay} segundos antes del reintento {attempt}.",
         file=sys.stderr,
     )
-    time.sleep(BOT_RETRY_DELAY_SECONDS)
+    time.sleep(retry_delay)
 
 
 def download_video_with_retries(
-    url: str, output_dir: Path, ydl: yt_dlp.YoutubeDL
-) -> tuple[Path, Path, Path | None]:
-    attempts = BOT_MAX_RETRIES + 1
+    url: str,
+    output_dir: Path,
+    ydl: yt_dlp.YoutubeDL,
+    *,
+    thumbnail_only: bool = False,
+    max_retries: int = BOT_MAX_RETRIES,
+    retry_delay: int = BOT_RETRY_DELAY_SECONDS,
+) -> tuple[Path, Path, Path | None, int]:
+    attempts = max_retries + 1
 
     for attempt in range(1, attempts + 1):
         try:
-            return download_video(url, output_dir, ydl)
+            saved_path, metadata_path, thumbnail_path = download_video(
+                url, output_dir, ydl, thumbnail_only=thumbnail_only
+            )
+            return saved_path, metadata_path, thumbnail_path, attempt
         except yt_dlp.utils.DownloadError as exc:
+            LOGGER.warning("DownloadError on attempt %s for %s: %s", attempt, url, exc)
             if not is_bot_verification_error(exc) or attempt == attempts:
                 raise
-            wait_before_retry(url, attempt)
+            wait_before_retry(url, attempt, retry_delay)
 
     raise RuntimeError(f"No se pudo descargar el video tras {attempts} intentos: {url}")
+
+
+def process_url(
+    url: str, output_dir: Path, ydl: yt_dlp.YoutubeDL, args: argparse.Namespace
+) -> DownloadResult:
+    if args.skip_existing and has_existing_output(
+        url, output_dir, thumbnail_only=args.thumbnail_only
+    ):
+        LOGGER.info("Skipped existing output for %s", url)
+        return result_from_skip(url)
+
+    saved_path, metadata_path, thumbnail_path, attempts = download_video_with_retries(
+        url,
+        output_dir,
+        ydl,
+        thumbnail_only=args.thumbnail_only,
+        max_retries=args.max_retries,
+        retry_delay=args.retry_delay,
+    )
+    return DownloadResult(
+        url=url,
+        status="success",
+        output_file=str(saved_path.resolve()) if str(saved_path) else "",
+        metadata_file=str(metadata_path.resolve()),
+        thumbnail_file=str(thumbnail_path.resolve()) if thumbnail_path else "",
+        error_type="",
+        error_message="",
+        attempts=attempts,
+    )
 
 def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
+
+    if args.audio_only and args.thumbnail_only:
+        parser.error("No puedes usar --audio-only y --thumbnail-only al mismo tiempo")
 
     try:
         urls = collect_urls(args)
@@ -324,33 +547,71 @@ def main() -> int:
 
     output_dir = Path(args.output_dir)
     ydl_opts = build_ydl_options(output_dir, args)
+    log_path = setup_logging(output_dir)
     downloaded_count = 0
+    skipped_count = 0
     failed_urls: list[str] = []
+    results: list[DownloadResult] = []
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         for url in urls:
             try:
-                saved_path, metadata_path, thumbnail_path = download_video_with_retries(
-                    url, output_dir, ydl
-                )
-                downloaded_count += 1
-                print(f"Video descargado en: {saved_path.resolve()}")
-                print(f"Metadatos guardados en: {metadata_path.resolve()}")
-                if thumbnail_path:
-                    print(f"Miniatura guardada en: {thumbnail_path.resolve()}")
+                result = process_url(url, output_dir, ydl, args)
+                results.append(result)
+                if result.status == "skipped":
+                    skipped_count += 1
+                    print(f"Descarga omitida para {url}: {result.error_message}")
                 else:
-                    print("No se encontro la miniatura descargada.", file=sys.stderr)
+                    downloaded_count += 1
+                    LOGGER.info("Downloaded %s -> %s", url, result.output_file or result.thumbnail_file)
+                    if result.output_file:
+                        print(f"Archivo descargado en: {result.output_file}")
+                    print(f"Metadatos guardados en: {result.metadata_file}")
+                    if result.thumbnail_file:
+                        print(f"Miniatura guardada en: {result.thumbnail_file}")
+                    elif not args.audio_only:
+                        print("No se encontro la miniatura descargada.", file=sys.stderr)
             except yt_dlp.utils.DownloadError as exc:
                 failed_urls.append(url)
-                print(f"No se pudo descargar {url}: {exc}", file=sys.stderr)
+                error_type, user_message = classify_error(exc)
+                results.append(
+                    DownloadResult(
+                        url=url,
+                        status="failed",
+                        output_file="",
+                        metadata_file="",
+                        thumbnail_file="",
+                        error_type=error_type,
+                        error_message=user_message,
+                        attempts=args.max_retries + 1 if is_bot_verification_error(exc) else 1,
+                    )
+                )
+                LOGGER.error("Failed %s [%s]: %s", url, error_type, exc)
+                print(f"No se pudo descargar {url}: {user_message}", file=sys.stderr)
             except Exception as exc:  # pragma: no cover
                 failed_urls.append(url)
+                results.append(
+                    DownloadResult(
+                        url=url,
+                        status="failed",
+                        output_file="",
+                        metadata_file="",
+                        thumbnail_file="",
+                        error_type="unexpected_error",
+                        error_message=str(exc),
+                        attempts=1,
+                    )
+                )
+                LOGGER.exception("Unexpected error for %s", url)
                 print(f"Ocurrio un error inesperado con {url}: {exc}", file=sys.stderr)
 
+    results_path = write_results_csv(output_dir, results)
     print(
         f"Resumen: {downloaded_count} descargado(s), "
-        f"{len(failed_urls)} fallido(s), {len(urls)} total."
+        f"{skipped_count} omitido(s), {len(failed_urls)} fallido(s), {len(urls)} total."
     )
+    print(f"Resultados guardados en: {results_path.resolve()}")
+    print(f"Log guardado en: {log_path.resolve()}")
 
     if failed_urls:
         failed_path = write_failed_urls(output_dir, failed_urls)
