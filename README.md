@@ -2,6 +2,10 @@
 
 Proyecto en Python para descargar videos de YouTube en calidad maxima de 720p, guardarlos con el titulo del video, bajar su miniatura principal en la mayor calidad disponible y generar un `.txt` con sus metadatos.
 
+## Licencia
+
+Este proyecto se distribuye bajo la licencia GNU GPLv3. Consulta [LICENSE](/Users/gadem/Developer/python/youtube_downloader/LICENSE).
+
 ## Requisitos
 
 - Python 3.10 o superior
