@@ -71,6 +71,12 @@ Para descargar solo la miniatura y metadatos:
 python3 download_youtube.py --thumbnail-only "https://www.youtube.com/watch?v=VIDEO_ID"
 ```
 
+Para guardar cada video en su propia carpeta:
+
+```bash
+python3 download_youtube.py --per-video-dir "https://www.youtube.com/watch?v=VIDEO_ID"
+```
+
 Si YouTube pide verificacion de bot, puedes usar cookies del navegador:
 
 ```bash
@@ -100,6 +106,7 @@ python3 download_youtube.py --cookies-from-browser chrome --js-runtime node
 - `--retry-delay` y `--max-retries` permiten ajustar la estrategia de reintentos antibot.
 - `--audio-only` descarga solo el audio del video.
 - `--thumbnail-only` descarga solo la miniatura y el archivo de metadatos.
+- `--per-video-dir` guarda cada descarga en una carpeta separada nombrada con titulo e ID.
 - Si `ffmpeg` esta instalado, `yt-dlp` puede descargar mejor combinacion de video y audio manteniendo el objetivo de 720p.
 - Si no existe una version exacta a 720p, se descargara la mejor disponible que no supere esa altura.
 - Algunos videos de YouTube pueden requerir cookies de sesion para pasar la verificacion antibot.

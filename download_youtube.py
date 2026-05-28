@@ -43,6 +43,7 @@ LOG_FILENAME = "last_run.log"
 class DownloadResult:
     url: str
     status: str
+    output_dir: str
     output_file: str
     metadata_file: str
     thumbnail_file: str
@@ -144,6 +145,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Descarga solo la miniatura y los metadatos, sin bajar el video.",
     )
+    parser.add_argument(
+        "--per-video-dir",
+        action="store_true",
+        help="Guarda cada descarga en una carpeta separada con video, miniatura y metadatos.",
+    )
     return parser
 
 
@@ -166,6 +172,24 @@ def sanitize_name(value: str, fallback: str = "video") -> str:
         character for character in value if character not in '<>:"/\\|?*'
     ).strip()
     return cleaned or fallback
+
+
+def build_video_stem(info: dict) -> str:
+    title = sanitize_name(info.get("title", "video"))
+    video_id = sanitize_name(info.get("id", "video"))
+    return f"{title} [{video_id}]"
+
+
+def build_target_directory(output_dir: Path, info: dict, per_video_dir: bool) -> Path:
+    if not per_video_dir:
+        return output_dir
+    return output_dir / build_video_stem(info)
+
+
+def build_output_template(base_output_dir: Path, per_video_dir: bool) -> str:
+    if per_video_dir:
+        return str(base_output_dir / "%(title)s [%(id)s]" / "%(title)s [%(id)s].%(ext)s")
+    return str(base_output_dir / "%(title)s [%(id)s].%(ext)s")
 
 
 def format_duration(seconds: int | None) -> str:
@@ -219,7 +243,7 @@ def resolve_thumbnail_path(video_path: Path, info: dict) -> Path | None:
     return None
 
 
-def resolve_downloaded_path(output_dir: Path, info: dict, ydl: yt_dlp.YoutubeDL) -> Path:
+def resolve_downloaded_path(target_dir: Path, info: dict, ydl: yt_dlp.YoutubeDL) -> Path:
     requested_downloads = info.get("requested_downloads") or []
     if requested_downloads:
         for download in requested_downloads:
@@ -237,9 +261,8 @@ def resolve_downloaded_path(output_dir: Path, info: dict, ydl: yt_dlp.YoutubeDL)
     if mp4_candidate.exists():
         return mp4_candidate
 
-    title = sanitize_name(info.get("title", "video"))
-    video_id = sanitize_name(info.get("id", "video"))
-    matches = sorted(output_dir.glob(f"{title} [{video_id}].*"))
+    stem = build_video_stem(info)
+    matches = sorted(target_dir.glob(f"{stem}.*"))
     for match in matches:
         if match.suffix.lower() in VIDEO_EXTENSIONS:
             return match
@@ -264,20 +287,38 @@ def extract_video_id_from_url(url: str) -> str | None:
     return None
 
 
-def has_existing_output(url: str, output_dir: Path, thumbnail_only: bool = False) -> bool:
+def has_existing_output(
+    url: str,
+    output_dir: Path,
+    thumbnail_only: bool = False,
+    per_video_dir: bool = False,
+) -> bool:
     video_id = extract_video_id_from_url(url)
     if not video_id:
         return False
 
     marker = f" [{video_id}]"
-    for candidate in output_dir.iterdir():
-        if not candidate.is_file() or marker not in candidate.stem:
-            continue
-        suffix = candidate.suffix.lower()
-        if thumbnail_only and suffix in {".webp", ".jpg", ".jpeg", ".png"}:
-            return True
-        if not thumbnail_only and suffix in VIDEO_EXTENSIONS:
-            return True
+    if per_video_dir:
+        for candidate_dir in output_dir.iterdir():
+            if not candidate_dir.is_dir() or marker not in candidate_dir.name:
+                continue
+            for candidate in candidate_dir.iterdir():
+                if not candidate.is_file():
+                    continue
+                suffix = candidate.suffix.lower()
+                if thumbnail_only and suffix in {".webp", ".jpg", ".jpeg", ".png"}:
+                    return True
+                if not thumbnail_only and suffix in VIDEO_EXTENSIONS:
+                    return True
+    else:
+        for candidate in output_dir.iterdir():
+            if not candidate.is_file() or marker not in candidate.stem:
+                continue
+            suffix = candidate.suffix.lower()
+            if thumbnail_only and suffix in {".webp", ".jpg", ".jpeg", ".png"}:
+                return True
+            if not thumbnail_only and suffix in VIDEO_EXTENSIONS:
+                return True
     return False
 
 
@@ -291,7 +332,7 @@ def build_ydl_options(output_dir: Path, args: argparse.Namespace) -> dict:
             audio_only=args.audio_only,
             thumbnail_only=args.thumbnail_only,
         ),
-        "outtmpl": str(output_dir / "%(title)s [%(id)s].%(ext)s"),
+        "outtmpl": build_output_template(output_dir, args.per_video_dir),
         "merge_output_format": "mp4",
         "noplaylist": True,
         "windowsfilenames": True,
@@ -347,13 +388,19 @@ def build_ydl_options(output_dir: Path, args: argparse.Namespace) -> dict:
 
 
 def download_video(
-    url: str, output_dir: Path, ydl: yt_dlp.YoutubeDL, thumbnail_only: bool = False
+    url: str,
+    output_dir: Path,
+    ydl: yt_dlp.YoutubeDL,
+    thumbnail_only: bool = False,
+    per_video_dir: bool = False,
 ) -> tuple[Path, Path, Path | None]:
     info = ydl.extract_info(url, download=True)
+    target_dir = build_target_directory(output_dir, info, per_video_dir)
+    target_dir.mkdir(parents=True, exist_ok=True)
     if thumbnail_only:
         final_path = Path(ydl.prepare_filename(info))
     else:
-        final_path = resolve_downloaded_path(output_dir, info, ydl)
+        final_path = resolve_downloaded_path(target_dir, info, ydl)
 
     metadata_path = write_metadata_file(final_path, info)
     thumbnail_path = resolve_thumbnail_path(final_path, info)
@@ -417,6 +464,7 @@ def result_from_skip(url: str) -> DownloadResult:
     return DownloadResult(
         url=url,
         status="skipped",
+        output_dir="",
         output_file="",
         metadata_file="",
         thumbnail_file="",
@@ -484,6 +532,7 @@ def download_video_with_retries(
     ydl: yt_dlp.YoutubeDL,
     *,
     thumbnail_only: bool = False,
+    per_video_dir: bool = False,
     max_retries: int = BOT_MAX_RETRIES,
     retry_delay: int = BOT_RETRY_DELAY_SECONDS,
 ) -> tuple[Path, Path, Path | None, int]:
@@ -492,7 +541,11 @@ def download_video_with_retries(
     for attempt in range(1, attempts + 1):
         try:
             saved_path, metadata_path, thumbnail_path = download_video(
-                url, output_dir, ydl, thumbnail_only=thumbnail_only
+                url,
+                output_dir,
+                ydl,
+                thumbnail_only=thumbnail_only,
+                per_video_dir=per_video_dir,
             )
             return saved_path, metadata_path, thumbnail_path, attempt
         except yt_dlp.utils.DownloadError as exc:
@@ -508,7 +561,10 @@ def process_url(
     url: str, output_dir: Path, ydl: yt_dlp.YoutubeDL, args: argparse.Namespace
 ) -> DownloadResult:
     if args.skip_existing and has_existing_output(
-        url, output_dir, thumbnail_only=args.thumbnail_only
+        url,
+        output_dir,
+        thumbnail_only=args.thumbnail_only,
+        per_video_dir=args.per_video_dir,
     ):
         LOGGER.info("Skipped existing output for %s", url)
         return result_from_skip(url)
@@ -518,12 +574,15 @@ def process_url(
         output_dir,
         ydl,
         thumbnail_only=args.thumbnail_only,
+        per_video_dir=args.per_video_dir,
         max_retries=args.max_retries,
         retry_delay=args.retry_delay,
     )
+    result_output_dir = str(saved_path.parent.resolve()) if str(saved_path) else str(metadata_path.parent.resolve())
     return DownloadResult(
         url=url,
         status="success",
+        output_dir=result_output_dir,
         output_file=str(saved_path.resolve()) if str(saved_path) else "",
         metadata_file=str(metadata_path.resolve()),
         thumbnail_file=str(thumbnail_path.resolve()) if thumbnail_path else "",
@@ -578,6 +637,7 @@ def main() -> int:
                     DownloadResult(
                         url=url,
                         status="failed",
+                        output_dir="",
                         output_file="",
                         metadata_file="",
                         thumbnail_file="",
@@ -594,6 +654,7 @@ def main() -> int:
                     DownloadResult(
                         url=url,
                         status="failed",
+                        output_dir="",
                         output_file="",
                         metadata_file="",
                         thumbnail_file="",

@@ -55,6 +55,22 @@ class DownloadYoutubeTests(unittest.TestCase):
                 )
             )
 
+    def test_has_existing_output_detects_video_file_in_per_video_dir(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            output_dir = Path(tmp_dir)
+            video_dir = output_dir / "Titulo [abc123XYZ89]"
+            video_dir.mkdir()
+            existing = video_dir / "Titulo [abc123XYZ89].mp4"
+            existing.write_text("video", encoding="utf-8")
+
+            self.assertTrue(
+                download_youtube.has_existing_output(
+                    "https://www.youtube.com/watch?v=abc123XYZ89",
+                    output_dir,
+                    per_video_dir=True,
+                )
+            )
+
     def test_has_existing_output_ignores_thumbnail_for_video_download(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             output_dir = Path(tmp_dir)
@@ -78,6 +94,13 @@ class DownloadYoutubeTests(unittest.TestCase):
     def test_build_format_selector_uses_standard_mode(self):
         selector = download_youtube.build_format_selector(ffmpeg_available=False)
         self.assertEqual(selector, "best[height<=720][ext=mp4]/best[height<=720]/best")
+
+    def test_build_output_template_uses_per_video_dir_structure(self):
+        template = download_youtube.build_output_template(Path("downloads"), True)
+        self.assertEqual(
+            template,
+            "downloads/%(title)s [%(id)s]/%(title)s [%(id)s].%(ext)s",
+        )
 
     def test_classify_error_maps_format_issue(self):
         error_type, message = download_youtube.classify_error(
